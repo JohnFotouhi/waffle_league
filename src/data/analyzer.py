@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 import sys
 import signal
@@ -49,6 +50,7 @@ class DataAnalyzer:
         self.swid = swid
         self.league_id = league_id
         self.matchups = []
+        self.regular_season_matchups = []
         self.activities = []
         self.output_file = "waffle_league_analysis.txt"
          
@@ -68,7 +70,11 @@ class DataAnalyzer:
 
     def _get_matchups(self, league, year, timeout_seconds: int = 30):
         """Collect matchups from for a given league year."""
-        for week in range(1, league.current_week):
+        for week in range(1, league.current_week + 1):
+            # Skip the current week of the current year since it may be incomplete
+            current_year = datetime.now().year
+            if year == current_year and week == league.current_week:
+                continue
 
             logger.info(f"Getting matchups for week {week} of {year}")
             for retry in range(3):
@@ -96,6 +102,8 @@ class DataAnalyzer:
                     year=year
                 )
                 self.matchups.append(date_matchup)
+                if matchup.matchup_type == "NONE":
+                    self.regular_season_matchups.append(date_matchup)
 
     def _get_activities(self, league: League, year: int, number_of_activities: int = 200, timeout_seconds: int = 30):
         """Collect recent league activities for a given year."""
@@ -168,10 +176,10 @@ class DataAnalyzer:
 
     def lowest_score_all_time(self, number_of_totals: int = 5):
         """Find the lowest score ever recorded in a matchup."""
-        sorted_winner_matchups = sorted(self.matchups, key=lambda x: x.winner_score)[:number_of_totals]
-        sorted_loser_matchups = sorted(self.matchups, key=lambda x: x.loser_score)[:number_of_totals]
+        sorted_winner_matchups = sorted(self.regular_season_matchups, key=lambda x: x.winner_score)[:number_of_totals]
+        sorted_loser_matchups = sorted(self.regular_season_matchups, key=lambda x: x.loser_score)[:number_of_totals]
 
-        self._write_to_file(f"\nTop {number_of_totals} lowest scores ever recorded:")
+        self._write_to_file(f"\nTop {number_of_totals} lowest scores ever recorded (regular season only):")
         self._write_to_file("=" * 50)
         winner_pointer = 0
         loser_pointer = 0
@@ -197,26 +205,45 @@ class DataAnalyzer:
 
         return top_results
 
-    def lifetime_top_scorers(self, number_of_teams: int = 5):
+    def lifetime_top_scorers(self, number_of_teams: int = 5, regular_season_only: bool = True):
         """Find the teams with the highest lifetime total points scored."""
         team_points = {}
-        for matchup in self.matchups:
+        number_games = {}
+        if regular_season_only:
+            matchups_to_consider = self.regular_season_matchups
+        else:
+            matchups_to_consider = self.matchups
+        for matchup in matchups_to_consider:
             winner_coach = matchup.winner.owners[0].get('firstName') + " " + matchup.winner.owners[0].get('lastName')
             loser_coach = matchup.loser.owners[0].get('firstName') + " " + matchup.loser.owners[0].get('lastName')
             team_points[winner_coach] = matchup.winner_score + team_points.get(winner_coach, 0)
             team_points[loser_coach] = matchup.loser_score + team_points.get(loser_coach, 0)
+            number_games[winner_coach] = number_games.get(winner_coach, 0) + 1
+            number_games[loser_coach] = number_games.get(loser_coach, 0) + 1
 
         sorted_teams = sorted(team_points.items(), key=lambda x: x[1], reverse=True)[:number_of_teams]
-        self._write_to_file(f"\nTop {number_of_teams} lifetime top scorers:")
+        self._write_to_file(f"\nTop lifetime top scorers:")
         self._write_to_file("=" * 50)
         for i, (coach, points) in enumerate(sorted_teams, 1):
             self._write_to_file(f"#{i}: {coach} with {round(points, 2)} total points scored.")
 
-    def season_points_allowed(self, start_year: int, end_year: int, number_of_teams: int = 5):
+        sorted_teams_avg = sorted(team_points.items(), key=lambda x: x[1] / number_games[x[0]], reverse=True)[:number_of_teams]
+        self._write_to_file(f"\nTop lifetime average top scorers:")
+        self._write_to_file("=" * 50)
+        for i, (coach, points) in enumerate(sorted_teams_avg, 1):
+            average_points = points / number_games[coach]
+            self._write_to_file(f"#{i}: {coach} with an average of {round(average_points, 2)} points per game.")
+
+    def season_points_allowed(self, start_year: int, end_year: int, number_of_teams: int = 5, regular_season_only: bool = True):
         """Calculate total points allowed per team per season."""
         points_allowed = {}
 
-        for matchup in self.matchups:
+        if regular_season_only:
+            matchups_to_consider = self.regular_season_matchups
+        else:
+            matchups_to_consider = self.matchups
+
+        for matchup in matchups_to_consider:
             if matchup.year <= end_year and matchup.year >= start_year:
                 winner_coach = matchup.winner.owners[0].get('firstName') + " " + matchup.winner.owners[0].get('lastName') + "," + str(matchup.year)
                 loser_coach = matchup.loser.owners[0].get('firstName') + " " + matchup.loser.owners[0].get('lastName') + "," + str(matchup.year)
@@ -236,3 +263,100 @@ class DataAnalyzer:
         for i, (coach_year, points) in enumerate(lowest_teams, 1):
             coach, year = coach_year.split(",")
             self._write_to_file(f"#{i}: {coach} in {year} allowed only {round(points, 2)} points.")
+
+    def _get_coaches_from_matchups(self):
+        """Helper to get unique coaches from matchups."""
+        coaches = set()
+        for matchup in self.matchups:
+            coaches.add(matchup.winner.owners[0].get('firstName') + " " + matchup.winner.owners[0].get('lastName'))
+            coaches.add(matchup.loser.owners[0].get('firstName') + " " + matchup.loser.owners[0].get('lastName'))
+        return list(coaches)
+
+    def streaks(self, number_of_streaks: int = 5, regular_season_only: bool = True):
+        """Analyze winning and losing streaks."""
+        coaches = self._get_coaches_from_matchups()
+        losing_streaks = []
+        winning_streaks = []
+
+        for coach in coaches:
+            win_streak = 0
+            loss_streak = 0
+            sorted_matchups = sorted(self.matchups, key=lambda x: (x.year, x.week))
+            for matchup in sorted_matchups:
+                # matchup.matchup_type is NONE for regular season games
+                if matchup.matchup_type != "NONE" and regular_season_only:
+                    continue
+                # Start the streak over for a new season
+                if matchup.week == 1:
+                    win_streak = 0
+                    loss_streak = 0
+                if matchup.winner.owners[0].get('firstName') + " " + matchup.winner.owners[0].get('lastName') == coach:
+                    # Check if we are transitioning from a loss streak to a win streak
+                    if loss_streak > 0:
+                        # Insert loss_streak into losing_streaks if it's in the top N
+                        for i in range(number_of_streaks):
+                            if i >= len(losing_streaks) or loss_streak > losing_streaks[i]['streak']:
+                                losing_streaks.insert(i, {'coach': coach, 'streak': loss_streak, 'end_year': matchup.year, 'end_week': matchup.week})
+                                while len(losing_streaks) > number_of_streaks and losing_streaks[-1]['streak'] < loss_streak:
+                                    losing_streaks.pop()
+                                break
+                    win_streak += 1
+                    loss_streak = 0
+                elif matchup.loser.owners[0].get('firstName') + " " + matchup.loser.owners[0].get('lastName') == coach:
+                    # Check if we are transitioning from a win streak to a loss streak
+                    if win_streak > 0:
+                        # Insert win_streak into winning_streaks if it's in the top N
+                        for i in range(number_of_streaks):
+                            if i >= len(winning_streaks) or win_streak > winning_streaks[i]['streak']:
+                                winning_streaks.insert(i, {'coach': coach, 'streak': win_streak, 'end_year': matchup.year, 'end_week': matchup.week})
+                                while len(winning_streaks) > number_of_streaks and winning_streaks[-1]['streak'] < win_streak:
+                                    winning_streaks.pop()
+                                break
+                    loss_streak += 1
+                    win_streak = 0
+
+        regular_season_string = "Regular Season " if regular_season_only else ""
+        self._write_to_file(f"\nTop {number_of_streaks} {regular_season_string}Winning streaks:")
+        self._write_to_file("=" * 50)
+        for i, streak in enumerate(winning_streaks, 1):
+            if streak:
+                self._write_to_file(f"#{i}: {streak['coach']} with a winning streak of {streak['streak']} ending in week {streak['end_week']} of {streak['end_year']}.")
+
+        self._write_to_file(f"\nTop {number_of_streaks} {regular_season_string}Losing streaks:")
+        self._write_to_file("=" * 50)
+        for i, streak in enumerate(losing_streaks, 1):
+            if streak:
+                self._write_to_file(f"#{i}: {streak['coach']} with a losing streak of {streak['streak']} ending in week {streak['end_week']} of {streak['end_year']}.")
+
+    def points_scored(self, number_of_spots: int = 5, regular_season_only: bool = True):
+        current_year = str(datetime.now().year)
+        point_totals = {}
+
+        if regular_season_only:
+            matchups_to_consider = self.regular_season_matchups
+        else:
+            matchups_to_consider = self.matchups
+
+        for matchup in matchups_to_consider:
+            winner_coach = matchup.winner.owners[0].get('firstName') + " " + matchup.winner.owners[0].get('lastName') + "," + str(matchup.year)
+            loser_coach = matchup.loser.owners[0].get('firstName') + " " + matchup.loser.owners[0].get('lastName') + "," + str(matchup.year)
+            point_totals[winner_coach] = matchup.winner_score + point_totals.get(winner_coach, 0)
+            point_totals[loser_coach] = matchup.loser_score + point_totals.get(loser_coach, 0)
+
+        highest_totals = sorted(point_totals.items(), key=lambda x: x[1], reverse=True)[:number_of_spots]
+
+        lowest_totals = [item for item in point_totals.items() if current_year not in item[0]]
+        lowest_totals = sorted(lowest_totals, key=lambda x: x[1])[:number_of_spots]
+
+        self._write_to_file(f"\nTop {number_of_spots} lowest point totals in a season:")
+        self._write_to_file("=" * 50)
+        for i, (coach_year, points) in enumerate(lowest_totals, 1):
+            coach, year = coach_year.split(",")
+            self._write_to_file(f"#{i}: {coach} in {year} scored only {round(points, 2)} points.")
+
+        self._write_to_file(f"\nTop {number_of_spots} highest point totals in a season:")
+        self._write_to_file("=" * 50)
+        for i, (coach_year, points) in enumerate(highest_totals, 1):
+            coach, year = coach_year.split(",")
+            self._write_to_file(f"#{i}: {coach} in {year} scored {round(points, 2)} points.")
+

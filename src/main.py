@@ -17,6 +17,9 @@ def main():
     analyzer = DataAnalyzer(league_id=league_id, espn_s2=espn_s2, swid=swid)
     analyzer.get_data(start_year=2023, end_year=2025)
 
+    # if os.path.exists("waffle_league_analysis.txt"):
+    #     os.remove("waffle_league_analysis.txt")
+
     lowest_winning_points = analyzer.lowest_winning_point_totals()
 
     highest_losing_points = analyzer.highest_losing_point_total()
@@ -31,6 +34,9 @@ def main():
 
     season_points_allowed = analyzer.season_points_allowed(2023, 2024)
 
+    regular_season_streaks = analyzer.streaks()
+
+    points_scored = analyzer.points_scored()
 
 if __name__ == "__main__":
     main()
